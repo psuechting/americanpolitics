@@ -1,7 +1,10 @@
 ---
-title: "Analysis for Project"
+title: "EC 523 Blog Post"
+author: "Peter Suechting"
+date: "11/22/2020"
 output: 
-  html_document: 
+  html_document:
+    df_print: paged
     fig_height: 6
     fig_width: 9
     toc: yes
@@ -10,11 +13,990 @@ output:
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
-source("check_packages.R")
-source("useful_functions.R")
+
+#  set wd ---------------------
+setwd("C:/Users/psuechting/OneDrive - University Of Oregon/U O/Papers in Progress/americanpolitics/analysis")
+
+# Load Packages
+library(pacman)
+# load utility packages
+p_load(tidyverse,ggplot2,dplyr,readr,purrr,pscl,stargazer,broom,ggpubr,tm,forcats,reshape2,tinytex,sandwich,plm,AER,knitr,devtools,raster,scales,janitor,kableExtra,remotes,gridExtra)
+
+# Load data gathering packages
+p_load(ropensecretsapi,cspp,gapminder)
+
+# load mapping packages
+p_load(maps, usmap, cowplot, googleway, ggrepel, ggspatial, sf, rnaturalearth, rnaturalearthdata, rgeos)
+
+# install dev version of politicaldata from github
+remotes::install_github("elliottmorris/politicaldata")
+library(politicaldata)
+
+# Define a useful caption/title wrapper function :)
+
+wrapper <- function(x, ...) {
+  paste(strwrap(x, ...), collapse = "\n")
+}
+
+# conversion functions from the WaPo Analysis
+fmt_c <- function(degrees_celsius) {
+  paste0(format(degrees_celsius, digits=3), "ºC")
+}
+
+fmt_f <- function(degrees_fahrenheit) {
+    paste0(format(degrees_fahrenheit, digits=3), "ºF")
+}
 ```
 
-# Introduction
-<a href="#top">Back to top</a>
+# Introduction: what relationship, if any?
 
-Use this R Markdown to perform the main analysis for the project. I use this basically as a lab notebook. It contains the main analysis and a variety of sensitivity analysis. The code in this documents serves as a baseline for the eventual tables and figures that will go into the paper. At the same time it will serve as a record of all supplementary analyses performed. 
+What is the relationship between rates of warming in the contiguous United States since 1895 and recent presidential election results, from 2000 to 2016? One might question whether the rates of warming, as measured in increments of degrees Celsius per year, would really have much of an effect on which party voters choose in presidential elections. The saliency of climate change in the national political discourse has been rising over the past three decades, however, and it is probably fair to say that most American voters have some opinion on climate change, positive or negative. Moreover, the science attributing the increased extremity and occurrence of natural disasters has grown and become more certain. In addition, more and more people have become exposed to the impacts of warming on their lives and livelihoods, as recent extreme weather events like Hurricane Harvey, or the decimation of Paradise, CA have demonstrated in vivid detail. ["CarbonBrief"](https://www.carbonbrief.org/mapped-how-climate-change-affects-extreme-weather-around-the-world), for example, plots the incidence of extreme weather events and whether peer-reviewed studies have linked these events' severity to climate change. Thus, it seems possible that a relationship between rates of warming and voting behavior may not only exist, but might strengthen over time as the cumulative amount of warming and associated impacts increases. 
+
+An assumption that the hypothesis above relies upon, it must be noted, is that voters tend to associate Democrats with climate action, and Republicans with climate denial (or a vaguer form of domestic fossil energy protectionism). My conclusions will be necessarily reliant upon this simplifying assumption, that voters pick Democrats for climate action and Republicans for climate denial/fossil energy protectionism. There is a further implicit assumption: voters experiencing warming interpret it as a case of climate change (whatever the valence of that interpretation is) and pick candidates based on what their desired outcomes regarding climate change are, whether that's climate action or denial/fossil energy protectionism. With these caveats in mind, let's turn to first to the data, and next to the testing of this hypothesized relationship between county-level rates of warming and Democratic vote share.
+
+# Reproducing WaPo's analysis: 
+## Calculating the average rate of warming at the county-level in the United States, from 1895 to 2019.
+
+To analyze warming temperatures in the United States, I drew upon an analysis presented by The Washington Post. 
+
+- ["Extreme climate change has arrived in America,"](https://www.washingtonpost.com/graphics/2019/national/climate-environment/climate-change-america/) published August 13, 2019
+- ["In fast-warming Minnesota, scientists are trying to plant the forests of the future,"](https://www.washingtonpost.com/graphics/2020/climate-solutions/climate-change-minnesota/) published April 29, 2020
+- ["This giant climate hot spot is robbing the West of its water,"](https://www.washingtonpost.com/graphics/2020/national/climate-environment/climate-change-colorado-utah-hot-spot/) published August 7, 2020
+
+The Washington Post used the National Oceanic and Atmospheric Administration’s Climate Divisional Database (nClimDiv) and Gridded 5km GHCN-Daily Temperature and Precipitation Dataset (nClimGrid) data sets, which provide monthly temperature data between 1895 and 2019 for the Lower 48 states. They calculate the annual mean temperature trends in each state and county in the Lower 48 using linear regression — analyzing both annual average temperatures and temperatures for the three-month winter season (December, January and February). The Washington Post offers several data files that reproduce their analysis of climate change:
+
+1. [Processing nClimDiv data](https://washingtonpost.github.io/data-2C-beyond-the-limit-usa/analysis/process_nclimdiv.html)
+2. [Modeling temperature change](https://washingtonpost.github.io/data-2C-beyond-the-limit-usa/analysis/model_temperature_change.html)
+3. [Analyzing nClimGrid raster data](https://washingtonpost.github.io/data-2C-beyond-the-limit-usa/analysis/analyze_nclimgrid.html)
+
+For the purposes of this post, I will only be using the first two files, to first process the data and then model rates of temperature change on the county level. Below, I echo some of the code, specifically the model temperature change, so readers can see how the key independent variable for this hypothesis testing exercise is constructed.
+
+```{r load and process temp change data, include=FALSE, warning=FALSE, message=FALSE}
+# https://www2.census.gov/geo/docs/reference/state.txt?#
+statefips <- read_delim(
+  "input/raw/state.txt",
+  "|",
+  escape_double = FALSE,
+  trim_ws = TRUE,
+  col_types = cols(
+    STATE = col_character(),
+    STUSAB = col_character(),
+    STATE_NAME = col_character(),
+    STATENS = col_character()
+  )
+)
+
+census <- read_csv("input/raw/co-est2018-alldata.csv") %>% 
+  mutate(fips=paste0(STATE, COUNTY)) %>%
+  dplyr::select(fips, POPESTIMATE2018)
+
+countynames <- read_csv("input/raw/co-est2018-alldata.csv") %>% 
+  mutate(fips=paste0(STATE, COUNTY)) %>% 
+  dplyr::select(fips, CTYNAME, STNAME)
+
+noaastate <-
+  read_csv("input/raw/noaastate.txt") %>%
+  left_join(statefips, by=c("state"="STATE_NAME"))
+
+state_filepath    <- "input/raw/climdiv-tmpcst-v1.0.0-20201104"
+county_filepath   <- "input/raw/climdiv-tmpccy-v1.0.0-20201104"
+
+# To use the latest data, download the files, uncomment the following lines and change the filenames to match the files you downloaded.
+# national_filepath  <- "../data/raw/110-tavg-12-12-1895-YYYY.txt"
+# state_filepath     <- "../data/raw/climdiv-tmpcst-v1.0.0-YYYYMMDD.txt"
+# county_filepath    <- "../data/raw/climdiv-tmpccy-v1.0.0-YYYYMMDD.txt"
+
+climdiv_state <- 
+  read_fwf(
+    state_filepath, 
+    fwf_widths(
+      c(1, 2, 1, 2, 4, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7), 
+      c("dont_care", "noaa_state_order", "divisional_number", "code", "year", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+    ),
+    col_types = cols(
+      dont_care = col_integer(),
+      noaa_state_order = col_character(),
+      divisional_number = col_integer(),
+      code = col_character(),
+      year = col_integer(),
+      Jan = col_double(),
+      Feb = col_double(),
+      Mar = col_double(),
+      Apr = col_double(),
+      May = col_double(),
+      Jun = col_double(),
+      Jul = col_double(),
+      Aug = col_double(),
+      Sep = col_double(),
+      Oct = col_double(),
+      Nov = col_double(),
+      Dec = col_double()
+    )
+  ) %>% 
+  filter(noaa_state_order <= 48 & dont_care == "0") %>% 
+  left_join(noaastate, by="noaa_state_order") %>% 
+  mutate(fips = STATE) %>%
+  dplyr::select(-code, -STUSAB, -STATENS, -STATE, -dont_care, -divisional_number, -noaa_state_order, -state) %>% 
+  gather("month", "temp", -year, -fips) %>% 
+  mutate(temp=as.numeric(temp))
+
+write_csv(climdiv_state, "input/processed/climdiv_state.csv")
+
+climdiv_state_year <-
+  climdiv_state %>%
+  filter(year < 2020) %>%
+  group_by(fips, year) %>%
+  summarise(temp = mean(temp)) %>%
+  mutate(tempc = (temp - 32) * 5 / 9)
+
+write_csv(climdiv_state_year, "input/processed/climdiv_state_2020.csv")
+
+# Note that NOAA retroceded D.C. to Maryland for the purposes of this data set, so it shows up here with the ID 18511.
+climdiv_county <-
+  read_fwf(
+    county_filepath,
+    fwf_widths(
+      c(2, 3, 2, 4, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7),
+      c("noaa_state_order", "countyfips", "code", "year", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+    ),
+    col_types = cols(
+      noaa_state_order = col_character(),
+      countyfips = col_character(),
+      code = col_character(),
+      year = col_integer(),
+      Jan = col_double(),
+      Feb = col_double(),
+      Mar = col_double(),
+      Apr = col_double(),
+      May = col_double(),
+      Jun = col_double(),
+      Jul = col_double(),
+      Aug = col_double(),
+      Sep = col_double(),
+      Oct = col_double(),
+      Nov = col_double(),
+      Dec = col_double()
+    )
+  ) %>%
+  filter(noaa_state_order <= 48) %>% 
+  left_join(noaastate, by="noaa_state_order") %>%
+  mutate(fips = paste0(STATE, countyfips)) %>%
+  dplyr::select(-code, -STATE, -STUSAB, -STATENS, -noaa_state_order, -countyfips, -state) %>%
+  gather("month", "temp", -fips, -year) %>%
+  mutate(temp=as.numeric(temp), fips=case_when(fips=="24511"~"11001", TRUE~fips))
+
+write_csv(climdiv_county, "input/processed/climdiv_county.csv")
+
+climdiv_county_year <-
+  climdiv_county %>%
+  filter(year < 2020) %>%
+  group_by(fips, year) %>%
+  summarise(temp = mean(temp)) %>%
+  mutate(tempc = (temp - 32) * 5 / 9)
+
+write_csv(climdiv_county_year, "input/processed/climdiv_county_2020.csv")
+
+```
+
+```{r model temperature change on county level data, include=TRUE, warning=FALSE, message=FALSE}
+# The function `modelAnnualTempChg` uses linear regression to model the relationship between the year and temperature. The slope of this model is an estimate of the rate at which the temperature is changing, which we then multiply by 124 to extrapolate the rate to an estimate of temperature change over the entire period from 1895 to 2019.
+
+# this part is split out because we will reuse it later on.
+extractModelVariables <-
+  . %>% 
+  mutate(
+    slope = mod$coefficients[2],
+    intercept = mod$coefficients[1],
+    pvalue=summary(mod)$coefficients[,4][2], 
+    rsquared=summary(mod)$r.squared,
+    tempchg = slope * 124, 
+    centurychg = slope * 100, 
+    decadechg = slope * 10,
+    tempchg_c = tempchg / 1.8,
+    decadechg_c = decadechg / 1.8,
+    bin = cut(tempchg_c, c(-Inf, 0, 0.5, 1.0, 1.5, 2, Inf))
+  )
+
+modelAnnualTempChg <-
+  . %>% 
+  do(mod = lm(temp ~ year, data = .)) %>% 
+  extractModelVariables()
+
+```
+
+```{r create data sets and merge, include=TRUE, echo = FALSE, warning=FALSE, message=FALSE}
+model_state <-
+  climdiv_state_year %>% 
+  group_by(fips) %>% 
+  modelAnnualTempChg() %>% 
+  left_join(statefips, by=c("fips"="STATE")) %>%
+  arrange(desc(tempchg))
+
+model_county <-
+  climdiv_county_year %>% 
+  group_by(fips) %>% 
+  modelAnnualTempChg() %>%
+  left_join(census, by="fips")
+
+model_state <- model_state %>% mutate(state_name=STATE_NAME,`Temperature change`=paste0(fmt_c(tempchg_c), " (", fmt_f(tempchg), ")"),`Temperature change (Decade)`=paste0(fmt_c(decadechg_c), " (", fmt_f(decadechg), ")")) %>% dplyr::select(state_name,`Temperature change`,`Temperature change (Decade)`,slope,intercept,pvalue,rsquared,centurychg,decadechg_c,bin)
+
+
+model_county<-model_county %>% dplyr::select(fips,tempchg,tempchg_c,decadechg,decadechg_c,slope,intercept,centurychg,decadechg_c,bin)
+
+countynames<-countynames %>% mutate(county_name = CTYNAME,
+                        state_name = STNAME) %>% dplyr::select(fips,county_name,state_name)
+
+model_county<-model_county %>% left_join(countynames, by="fips") %>% dplyr::select(state_name,county_name,fips,tempchg,tempchg_c,decadechg,decadechg_c,slope,intercept,centurychg,decadechg_c,bin)
+model_county<-model_county %>% mutate(state_name = tolower(state_name)) %>% mutate(fips = as.character(fips))
+```
+```{r correlates of state policy project data, include=FALSE, warning=FALSE, message=FALSE}
+
+# define a vector of variables to gather from the Correlates of State Policy Project
+# Caleb Lucas and Joshua McCrain (2020). cspp: A Package for The Correlates of State Policy Project Data. R package version 0.3.1.
+cspp_vars <- c('environment_publicbenefit_funds',
+               'w_environment_solar_taxcredit',
+               'netmeter_yearadopted',
+               'personaltax_yearadopted',
+               'res_energy_price',
+               'co2emissions',
+               'frenew',
+               'frpsexc',
+               'frps')
+
+# Get metadata on variables gatheredfrom CSPP
+cspp_vars_info <- get_var_info(var_names = cspp_vars)
+
+cspp_vars_cap <- 'STATE POLICY VARIABLES: Caleb Lucas and Joshua McCrain (2020). cspp: A Package for The Correlates of State Policy Project Data. R package version 0.3.1.'
+
+# variables we will use for this analysis (consumer-facing/consumer-visible renewable energy laws)
+kable(cspp_vars_info[1:5],caption = cspp_vars_cap)
+
+# GET DATA FROM CSPP
+cspp_data <- get_cspp_data(vars = cspp_vars,years = seq(1980,2017))
+
+# Process Data From CSPP
+
+# environment_publicbenefit_funds / w_environment_solar_taxcredit / netmeter_yearadopted / personaltax_yearadopted
+cspp_data <- cspp_data %>% mutate(environment_publicbenefit_funds = as.double(environment_publicbenefit_funds),
+                                  w_environment_solar_taxcredit = as.double(w_environment_solar_taxcredit),
+                                  netmeter_yearadopted = as.double(netmeter_yearadopted),
+                                  personaltax_yearadopted = as.double(personaltax_yearadopted))
+
+cspp_data <- cspp_data %>% mutate(environment_publicbenefit_funds = if_else(is.na(environment_publicbenefit_funds) & year < 1996,0,environment_publicbenefit_funds),
+                                  netmeter_yearadopted = if_else(is.na(netmeter_yearadopted) & year < 2015,0,1),
+                                  w_environment_solar_taxcredit = if_else(is.na(w_environment_solar_taxcredit) & year < 2015,0,1),
+                                  personaltax_yearadopted = if_else(is.na(personaltax_yearadopted) & year <= 2017,0,1),
+                                  frenew = if_else(is.na(frenew) & year <= 2016,0,frenew),
+                                  frpsexc = if_else(is.na(frpsexc) & year <= 2016,0,frpsexc),
+                                  frps = if_else(is.na(frps) & year <= 2016,0,frps))
+
+# create dummy data.frame1 to hold the values for year 2014, which in the case of the below two variables are the extrapolated years
+dummy_df <- cspp_data %>% filter(year==2014) %>% mutate(epbf2014 = environment_publicbenefit_funds,
+                                                        westc2014 = w_environment_solar_taxcredit)
+# store vectors of values to extrapolate
+epbf2014_values <- dummy_df$environment_publicbenefit_funds
+westc2014_values <- dummy_df$w_environment_solar_taxcredit
+
+
+# create temp data.frames to hold updated year data based on extrapolation of final variable year values into the future
+cspp_data_p2015 <- cspp_data %>% filter(year<2015)
+
+cspp_data_2015 <- cspp_data %>% filter(year==2015) %>% mutate(environment_publicbenefit_funds = epbf2014_values,
+                                                              w_environment_solar_taxcredit = westc2014_values)
+cspp_data_2016 <- cspp_data %>% filter(year==2016) %>% mutate(environment_publicbenefit_funds = epbf2014_values,
+                                                              w_environment_solar_taxcredit = westc2014_values)
+cspp_data_2017<- cspp_data %>% filter(year==2017) %>% mutate(environment_publicbenefit_funds = epbf2014_values,
+                                                             w_environment_solar_taxcredit = westc2014_values)
+
+# rewrite cspp_data data.frame with bound together temp data.frames
+cspp_data <- rbind(cspp_data_p2015, cspp_data_2015, cspp_data_2016, cspp_data_2017)
+
+# create dummy data.frame2 to hold the values for year 2016, which in the case of variable below is the extrapolated year
+dummy_df1 <- cspp_data %>% filter(year==2016) %>% mutate(co2e2016 = co2emissions,
+                                                        frenew2016 = frenew,
+                                                        frpsexc2016 = frpsexc,
+                                                        frps2016 = frps)
+# store vectors of values from 2016 to extrapolate
+co2e2016_values <- dummy_df1$co2e2016
+frenew2016_values <- dummy_df1$frenew2016
+frpsexc2016_values <- dummy_df1$frpsexc2016
+frps2016_values <- dummy_df1$frps2016
+
+# create more temp data.dframes to hold updated year data basd on extrapolation of final variable year into the future
+
+cspp_data_p2016 <- cspp_data %>% filter(year<=2016)
+cspp_data_2016_2 <- cspp_data %>% filter(year==2016) %>% mutate(co2emissions = co2e2016_values,
+                                                                frenew = frenew2016_values,
+                                                                frpsexc = frpsexc2016_values,
+                                                                frps = frps2016_values)
+cspp_data_2017_2 <- cspp_data %>% filter(year==2017) %>% mutate(co2emissions = co2e2016_values,
+                                                                frenew = frenew2016_values,
+                                                                frpsexc = frpsexc2016_values,
+                                                                frps = frps2016_values)
+cspp_data <- rbind(cspp_data_p2016, cspp_data_2016_2, cspp_data_2017_2)
+
+# rename state to state_name, lower_case, and drop unnecessary variables
+cspp_data <- cspp_data %>% mutate(state_name = tolower(state)) %>% dplyr::select(year,
+                                                                    state_name,
+                                                                    co2emissions,
+                                                                    environment_publicbenefit_funds,
+                                                                    w_environment_solar_taxcredit,
+                                                                    netmeter_yearadopted,
+                                                                    personaltax_yearadopted,
+                                                                    res_energy_price,
+                                                                    frenew,
+                                                                    frpsexc,
+                                                                    frps)
+cspp_data <- cspp_data %>% filter(state_name != 'district of columbia')
+cspp_data %>% kable()
+```
+```{r Green Industrial Policy Plots, include=FALSE,eval=FALSE}
+# Generates a map of PBF states
+
+title_epbf <- 'Public Benefit Fund'
+subtitle_epbf <- 'Does the state have a public benefit fund for renewable energy and energy efficiency?'
+caption_epbf <- 'Public Benefit Funds (PBF), also frequently referred to as system benefits charge, are state-level programs developed through the electric industry restructuring process. PBFs allocate most of their money to energy efficiency, renewable energy, and low-income assistance programs.  PBF-supported programs include research and development and demand-side management. Furthermore, several utilities may apply PBFs to help meet their Renewable Portfolio Standards (RPS) and/or their state’s Energy Efficiency Resource Standard (EERS). (Center for Climate and Energy Solutions, https://www.c2es.org/document/public-benefit-funds/)'
+
+generate_map(cspp_data,
+             var_name = 'environment_publicbenefit_funds')+
+  ggplot2::theme(legend.position="none")
+
+
+ggplot(model_state, aes(x=`Temperature Change`,y=state_name))+
+  geom_point(aes(color=environment_publicbenefit_funds),size=3)+
+  xlim(1994,2018)+
+  theme_pubr(base_size = 10)+
+  theme(legend.position = 'none')+
+  labs(title = title_epbf,
+       subtitle = subtitle_epbf,
+       color = 'Public Benefit Fund in Place [Green]',
+       caption = wrapper(caption_e_pb_f,width = 300))
+
+# Generates a map of the percentage of net metering states
+
+title_nm <- 'Net Metering Implemented'
+subtitle_nm <- 'Has the state implemented on-site renewable energy generation?'
+caption_nm <- 'Net metering is a billing mechanism that credits solar energy system owners for the electricity they add to the grid. For example, if a residential customer has a PV system on their roof, it may generate more electricity than the home uses during daylight hours. If the home is net-metered, the electricity meter will run backwards to provide a credit against what electricity is consumed at night or other periods when the home\'s electricity use exceeds the system\'s output. Customers are only billed for their "net" energy use (SEIA). (Source: Solar Energy Industries Association, https://www.seia.org/)'
+
+generate_map(cspp_data,
+             var_name = 'netmeter_yearadopted')+
+  labs(title = title_nm,
+       subtitle = subtitle_nm)
+  ggplot2::theme(legend.position="none")
+
+
+ggplot(cspp_data, aes(x=year,y=state,color=netmeter_yearadopted))+
+  geom_point(aes(color=netmeter_yearadopted,size=3))+
+  xlim(1980,2017)+
+  theme_pubr(base_size = 10)+
+  theme(legend.position = 'none')+
+  labs(title = title_nm,
+       subtitle = subtitle_nm,
+       caption = wrapper(caption_nm,width = 300))
+
+
+```
+
+```{r presidential election results data, include=FALSE, warning=FALSE, message=FALSE}
+# load election results
+pres <- read_csv("C:/Users/psuechting/OneDrive - University Of Oregon/U O/Papers in Progress/americanpolitics/analysis/input/raw/countypres_2000-2016.csv",
+                 col_types = cols(FIPS = col_character()))
+
+# clean up pres results database
+pres<-pres %>% 
+  mutate(state_name = tolower(state),county_name = tolower(county),fips = tolower(FIPS)) %>% 
+  dplyr::select(fips,state_name,county_name,fips,year,party,candidate,candidatevotes,totalvotes) %>% 
+  filter(year%in% seq(1984,2016)) %>% 
+  filter(state_name != 'district of columbia')
+
+pres1<-pres %>% melt(id.vars=c("fips","state_name","county_name","year","party","totalvotes"),measure.vars=c("candidatevotes"))
+
+pres2 <- pres1 %>% dcast(fips+state_name+county_name+totalvotes~year+party,sum)
+
+pres3 <- pres2 %>% mutate(`2000_democrat` = `2000_democrat`/totalvotes,
+                 `2000_green` = `2000_green`/totalvotes,
+                 `2000_republican` = `2000_republican`/totalvotes,
+                 `2000_NA` = `2000_NA`/totalvotes,
+                 `2004_democrat` = `2004_democrat`/totalvotes,
+                 `2004_republican` = `2004_republican`/totalvotes,
+                 `2004_NA` = `2004_NA`/totalvotes,
+                 `2008_democrat` = `2008_democrat`/totalvotes,
+                 `2008_republican` = `2008_republican`/totalvotes,
+                 `2008_NA` = `2008_NA`/totalvotes,
+                 `2012_democrat` = `2012_democrat`/totalvotes,
+                 `2012_republican` = `2012_republican`/totalvotes,
+                 `2012_NA` = `2012_NA`/totalvotes,
+                 `2016_democrat` = `2016_democrat`/totalvotes,
+                 `2016_republican` = `2016_republican`/totalvotes,
+                 `2016_NA` = `2016_NA`/totalvotes)
+
+pres_results <- pres3 %>% group_by(state_name,fips,county_name) %>% summarize(dem2000 = sum(`2000_democrat`),
+                                              gre2000 = sum(`2000_green`),
+                                              rep2000 = sum(`2000_republican`),
+                                              na2000 = sum(`2000_NA`),
+                                              dem2004 = sum(`2004_democrat`),
+                                              rep2004 = sum(`2004_republican`),
+                                              na2004 = sum(`2004_NA`),
+                                              dem2008 = sum(`2008_democrat`),
+                                              rep2008 = sum(`2008_republican`),
+                                              na2008 = sum(`2008_NA`),
+                                              dem2012 = sum(`2012_democrat`),
+                                              rep2012 = sum(`2012_republican`),
+                                              na2012 = sum(`2012_NA`),
+                                              dem2016 = sum(`2016_democrat`),
+                                              rep2016 = sum(`2016_republican`),
+                                              na2016 = sum(`2016_NA`)) %>% mutate(fips = ifelse(str_length(fips)<5,paste0("0",fips),fips))
+
+```
+
+```{r merge climate and pres data.frames, warning=FALSE,message=FALSE,include=FALSE,eval=TRUE,error=FALSE,echo=FALSE}
+# 1984 Reagan defeats former president Vice President Walter Mondale, the Democratic Candidate
+# 2016 Trump defeats former Secretary of State Hillary Clinton, the Democratic Candidate
+county_climpres <- model_county %>% full_join(pres_results, by = c("fips")) %>% 
+  mutate(state_name = state_name.x, county_name = county_name.y) %>% 
+  dplyr::select(state_name,
+                county_name,
+                fips,
+                tempchg,
+                tempchg_c,
+                decadechg,
+                decadechg_c,
+                slope,
+                intercept,
+                centurychg,
+                bin,
+                dem2000,
+                gre2000, 
+                rep2000,
+                na2000,
+                dem2004,
+                rep2004,
+                na2004,
+                dem2008,
+                rep2008,
+                na2008,
+                dem2012,
+                rep2012,
+                na2012,
+                dem2016,
+                rep2016,
+                na2016)
+```
+
+# Mapping County-Level Rates of Warming & Presidential Results
+
+After loading and processing the data, the code for which I chose not to display due to its tediousness, I first map the data for the key independent variable, rate of warming in degrees Celsius, and the dependent variables, presidential election results, from 2000 to 2016.
+
+```{r maps rate of T change, warning=FALSE,message=FALSE,include=TRUE,eval=TRUE,error=FALSE,echo=FALSE}
+title_Trate <- 'Rate of warming by county (mean change in annual mean Temperature, degrees C)'
+subtitle_Trate <- 'How quickly is each county warming?'
+caption_Trate <- ''
+
+m1<-plot_usmap(data = county_climpres, values = "slope", exclude = c("HI","AK"), labels = FALSE)+
+  theme(legend.position = "right")+
+  scale_fill_gradient2(name = "avg delta, mean annual temp since 1895",
+                       low = "purple",
+                       high = "orange",
+                       midpoint = 0.015)+
+  labs(title = title_Trate,
+       subtitle = subtitle_Trate)
+```
+```{r maps 2016 results, warning=FALSE,message=FALSE,include=TRUE,eval=TRUE,error=FALSE,echo=FALSE}
+title_p2016 <- '2016 Presidential results by county'
+subtitle_p2016 <- 'What percentage of each county\'s vote went to Democrats in 2016?'
+caption_p2016 <- ''
+
+# 2016 results
+m2<-plot_usmap(data = county_climpres, values = "dem2016", exclude = c("HI","AK"), labels = FALSE)+
+  scale_fill_gradient2(name = "Democratic vote share, percentage",
+                       low = "red",
+                       high = "blue",
+                       midpoint = 0.5,
+                       label = scales::percent)+
+  theme(legend.position ="right")+
+  labs(title = title_p2016,
+       subtitle = subtitle_p2016)
+```
+```{r maps 2012 results, warning=FALSE,message=FALSE,include=TRUE,eval=TRUE,error=FALSE,echo=FALSE}
+title_p2012 <- '2012 Presidential results by county'
+subtitle_p2012 <- 'What percentage of each county\'s vote went to Democrats in 2012?'
+caption_p2012 <- ''
+
+# 2016 results
+m3<-plot_usmap(data = county_climpres, values = "dem2012", exclude = c("HI","AK"), labels = FALSE)+
+  scale_fill_gradient2(name = "Democratic vote share, percentage",
+                       low = "red",
+                       high = "blue",
+                       midpoint = 0.5,
+                       label = scales::percent)+
+  theme(legend.position ="right")+
+  labs(title = title_p2012,
+       subtitle = subtitle_p2012)
+```
+```{r maps 2008 results, warning=FALSE,message=FALSE,include=TRUE,eval=TRUE,error=FALSE,echo=FALSE}
+title_p2008 <- '2008 Presidential results by county'
+subtitle_p2008 <- 'What percentage of each county\'s vote went to Democrats in 2008?'
+caption_p2008 <- ''
+
+# 2016 results
+m4<-plot_usmap(data = county_climpres, values = "dem2008", exclude = c("HI","AK"), labels = FALSE)+
+  scale_fill_gradient2(name = "Democratic vote share, percentage",
+                       low = "red",
+                       high = "blue",
+                       midpoint = 0.5,
+                       label = scales::percent)+
+  theme(legend.position ="right")+
+  labs(title = title_p2008,
+       subtitle = subtitle_p2008)
+```
+```{r maps 2004 results, warning=FALSE,message=FALSE,include=TRUE,eval=TRUE,error=FALSE,echo=FALSE}
+title_p2004 <- '2004 Presidential results by county'
+subtitle_p2004 <- 'What percentage of each county\'s vote went to Democrats in 2004?'
+caption_p2004 <- ''
+
+# 2016 results
+m5<-plot_usmap(data = county_climpres, values = "dem2004", exclude = c("HI","AK"), labels = FALSE)+
+  scale_fill_gradient2(name = "Democratic vote share, percentage",
+                       low = "red",
+                       high = "blue",
+                       midpoint = 0.5,
+                       label = scales::percent)+
+  theme(legend.position ="right")+
+  labs(title = title_p2004,
+       subtitle = subtitle_p2004)
+```
+```{r maps 2000 results, warning=FALSE,message=FALSE,include=TRUE,eval=TRUE,error=FALSE,echo=FALSE}
+title_p2000 <- '2000 Presidential results by county'
+subtitle_p2000 <- 'What percentage of each county\'s vote went to Democrats in 2000?'
+caption_p2000 <- ''
+
+# 2016 results
+m6<-plot_usmap(data = county_climpres, values = "dem2000", exclude = c("HI","AK"), labels = FALSE)+
+  scale_fill_gradient2(name = "Democratic vote share, percentage",
+                       low = "red",
+                       high = "blue",
+                       midpoint = 0.5,
+                       label = scales::percent)+
+  theme(legend.position ="right")+
+  labs(title = title_p2000,
+       subtitle = subtitle_p2000)
+
+m1;m2;m3;m4;m5;m6
+```
+
+# Plotting County-level Presidential Results against Rates of Warming
+
+Next, I plot the data for each county in each presidential election against the county's rate of warming. Although a relationship between rate of warming and Democratic vote share is weak, and varies across election (which is to be expected), it is nonetheless present.
+
+```{r plot 2016 data, warning=FALSE,message=FALSE,include=TRUE,eval=TRUE,error=FALSE,echo=FALSE}
+title_2016plot <- '2016 Dem vote share vs. rate of change in annual mean temperature'
+subtitle_2016plot <- 'How is 2016 county-level Dem vote share related to rate of change in avg (temp) since 1895?'
+caption_2016plot <- ''
+x_lab_plot2016 <- 'rate of change in annual mean temp [celsius]'
+y_lab_plot2016 <- 'county-level Dem vote share'
+
+p1<-ggplot(county_climpres, aes(x=slope))+
+  geom_point(aes(y=dem2016), alpha = 0.3, color=ifelse(county_climpres$dem2016>0.5,"blue","red"))+
+  geom_hline(yintercept = 0.5)+
+  geom_smooth(method = "lm",aes(y=county_climpres$dem2016), se=FALSE, color="black")+
+  theme_pubclean(base_size = 8)+
+  scale_y_continuous(labels=scales::percent)+
+  labs(title = title_2016plot,
+       subtitle = subtitle_2016plot,
+       caption = caption_2016plot,
+       x = x_lab_plot2016,
+       y = y_lab_plot2016)
+p1
+```
+```{r plot 2012 data, warning=FALSE,message=FALSE,include=TRUE,eval=TRUE,error=FALSE,echo=FALSE}
+title_2012plot <- '2012 Dem vote share vs. rate of change in annual mean temperature'
+subtitle_2012plot <- 'How is 2012 county-level Dem vote share related to rate of change in avg (temp) since 1895?'
+caption_2012plot <- ''
+x_lab_plot2012 <- 'avg change in annual mean temperature per year, since 1895 [celsius]'
+y_lab_plot2012 <- 'county-level Dem vote share'
+
+p2<-ggplot(county_climpres, aes(x=slope))+
+  geom_point(aes(y=dem2012), alpha = 0.30, color=ifelse(county_climpres$dem2012>0.5,"blue","red"))+
+  geom_hline(yintercept = 0.5)+
+  geom_smooth(method = "lm",aes(y=county_climpres$dem2012), se=FALSE, color="black")+
+  theme_pubclean(base_size = 8)+
+  scale_y_continuous(labels=scales::percent)+
+  labs(title = title_2012plot,
+       subtitle = subtitle_2012plot,
+       caption = caption_2012plot,
+       x = x_lab_plot2012,
+       y = y_lab_plot2012)
+p2
+```
+```{r plot 2008 data, warning=FALSE,message=FALSE,include=TRUE,eval=TRUE,error=FALSE,echo=FALSE}
+title_2008plot <- '2008 Dem vote share vs. rate of change in annual mean temperature'
+subtitle_2008plot <- 'How is 2008 county-level Dem vote share related to rate of change in avg (temp) since 1895?'
+caption_2008plot <- ''
+x_lab_plot2008 <- 'rate of change in annual mean temp [celsius]'
+y_lab_plot2008 <- 'county-level Dem vote share'
+
+p3<-ggplot(county_climpres, aes(x=slope))+
+  geom_point(aes(y=dem2008), alpha = 0.30, color=ifelse(county_climpres$dem2008>0.5,"blue","red"))+
+  geom_hline(yintercept = 0.5)+
+  geom_smooth(method = "lm",aes(y=county_climpres$dem2008), se=FALSE, color="black")+
+  theme_pubclean(base_size = 8)+
+  scale_y_continuous(labels=scales::percent)+
+  labs(title = title_2008plot,
+       subtitle = subtitle_2008plot,
+       caption = caption_2008plot,
+       x = x_lab_plot2008,
+       y = y_lab_plot2008)
+p3
+```
+
+The relationship between county-level Democratic vote share and rate of warming is strongest in 2008, which may be interpreted as plausible evidence in support of the hypothesis. Barack Obama was a climate change candidate, famously remarking that his nomination to the Democratic candidacy would mark the moment 'when the rise of the oceans began to slow and our planet began to heal'. The plot suggests, therefore, that it is at least possible that counties which experienced some amount of warming-related impacts interpreted them as harbingers of climate change and voted for the party of climate action. Again, however, I must stress that a causal relationship must not be inferred; only the strength and direction of association between the two variables is provided to us by the linear models fitted to the data. 
+
+```{r plot 2004 data, warning=FALSE,message=FALSE,include=TRUE,eval=TRUE,error=FALSE,echo=FALSE}
+title_2004plot <- '2004 Dem vote share vs. rate of change in annual mean temperature'
+subtitle_2004plot <- 'How is 2004 county-level Dem vote share related to rate of change in avg (temp) since 1895?'
+caption_plot2004 <- ''
+x_lab_plot2004 <- 'rate of change in annual mean temp [celsius]'
+y_lab_plot2004 <- 'county-level Dem vote share'
+
+p4<-ggplot(county_climpres, aes(x=slope))+
+  geom_point(aes(y=dem2004), alpha = 0.30, color=ifelse(county_climpres$dem2004>0.5,"blue","red"))+
+  geom_hline(yintercept = 0.5)+
+  geom_smooth(method = "lm",aes(y=county_climpres$dem2004), se=FALSE, color="black")+
+  theme_pubclean(base_size = 8)+
+  scale_y_continuous(labels=scales::percent)+
+  labs(title = title_2004plot,
+       subtitle = subtitle_2004plot,
+       caption = caption_plot2004,
+       x = x_lab_plot2004,
+       y = y_lab_plot2004)
+p4
+```
+```{r plot 2000 data, warning=FALSE,message=FALSE,include=TRUE,eval=TRUE,error=FALSE,echo=FALSE}
+title_2000plot <- '2000 Dem vote share vs. rate of change in annual mean temperature'
+subtitle_2000plot <- 'How is 2000 county-level Dem vote share related to rate of change in avg (temp) since 1895?'
+caption_plot2000 <- ''
+x_lab_plot2000 <- 'rate of change in annual mean temp [celsius]'
+y_lab_plot2000 <- 'county-level Dem vote share'
+
+p5<-ggplot(county_climpres, aes(x=slope))+
+  geom_point(aes(y=dem2000), alpha = 0.30, color=ifelse(county_climpres$dem2000>0.5,"blue","red"))+
+  geom_hline(yintercept = 0.5)+
+  geom_smooth(method = "lm",aes(y=county_climpres$dem2000), se=FALSE, color="black")+
+  theme_pubclean(base_size = 8)+
+  scale_y_continuous(labels=scales::percent)+
+  labs(title = title_2000plot,
+       subtitle = subtitle_2000plot,
+       caption = caption_plot2000,
+       x = x_lab_plot2000,
+       y = y_lab_plot2000)
+p5
+```
+
+In the first elections analyzed here, in which Republicans prevailed in 2000 and 2004, the strength of the relationship between county-level rates of warming and Democratic vote share is weaker, and perhaps even negative. While it is possible to make up a narrative framing this as either positive or negative evidence for the hypothesized relationship, I prefer to view it as perhaps suggestive of temporal dynamism in the strength of the relationship over time. It could be one or both of the following: 1) either cumulative impacts had not developed enough for them to be interpretable as climate change-related; or, 2) that the Republican Party had not, at this point in history, wholly adopted a denier/fossil energy protectionist stance, and so the assumed identity between climate action and Democrats and Republicans with denial, respectively, may not have fully coalesced yet either. To put the latter reason in alternative language, the parties' ideological stances regarding climate were poorly developed and so voters sorted themselves accordingly, which is to say poorly, between the two choices.
+
+# Plotting County-Level Partisan Swing against Rates of Warming
+
+```{r calculate partisan swing, warning=FALSE,message=FALSE,include=TRUE,eval=TRUE,error=FALSE,echo=FALSE}
+county_climpres<-county_climpres %>% mutate(dem12to16 = dem2016-dem2012, # second-term-obama-to-trump voters (negative values) [red] / # second-term-obama-to-GEclinton voters (positive values) [blue]
+                           dem08to16 = dem2016-dem2008, # first-term-obama-to-trump voters (negative values) [red] / # first-term-obama-to-GEclinton vonters (positive values) [blue]
+                           dem04to16 = dem2016-dem2004, # GEKerry-to-trump voters (negative values) [red] / # second-term-Bush-to-GEclinton voters (positive values) [blue]
+                           dem00to16 = dem2016-dem2000,
+                           dem08to12 = dem2012-dem2008,
+                           dem04to12 = dem2012-dem2004,
+                           dem00to12 = dem2012-dem2000,
+                           dem04to08 = dem2008-dem2004,
+                           dem00to08 = dem2008-dem2000,
+                           dem00to04 = dem2004-dem2000)
+```
+```{r PLOT partisan swing, warning=FALSE,message=FALSE,include=TRUE,eval=TRUE,error=FALSE,echo=FALSE}
+x_lab_diff <- 'rate of change in annual mean temp [celsius]'
+
+county_climpres<-county_climpres %>% 
+  mutate(dwin16 = factor(1*(dem2016>0.5)),
+         dwin12 = factor(1*(dem2012>0.5)),
+         dwin08 = factor(1*(dem2008>0.5)),
+         dwin04 = factor(1*(dem2004>0.5)),
+         dwin00 = factor(1*(dem2004>0.5))) %>% 
+  mutate(wincategory2016 = factor(if_else(dwin16==1&&dwin12==1,"holdD",
+                                   if_else(dwin16==1&&dwin12==0,"flipD",
+                                           if_else(dwin16==0&&dwin12==1,"flipR",
+                                                   if_else(dwin16==0&&dwin12==0,"holdR","flag")))))) %>% 
+  mutate(wincategory2012 = factor(if_else(dwin12==1&&dwin08==1,"holdD",
+                                   if_else(dwin12==1&&dwin08==0,"flipD",
+                                           if_else(dwin12==0&&dwin08==1,"flipR",
+                                                   if_else(dwin12==0&&dwin08==0,"holdR","flag")))))) %>% 
+  mutate(wincategory2008 = factor(if_else(dwin08==1&&dwin04==1,"holdD",
+                                   if_else(dwin08==1&&dwin04==0,"flipD",
+                                           if_else(dwin08==0&&dwin04==1,"flipR",
+                                                   if_else(dwin08==0&&dwin04==0,"holdR","flag")))))) %>% 
+  mutate(wincategory2004 = factor(if_else(dwin04==1&&dwin00==1,"holdD",
+                                   if_else(dwin04==1&&dwin00==0,"flipD",
+                                           if_else(dwin04==0&&dwin00==1,"flipR",
+                                                   if_else(dwin04==0&&dwin00==0,"holdR","flag"))))))
+
+
+  #mutate(swing_category = if_else(dwin16 > 0 && dwin12 > 0, "holdD",if_else(dwin16 > 0 && dwin12 < 0, "flipD",if_else(dwin16 < 1 && dwin12 > 0, "flipR","holdR"))))
+p_diff1<-ggplot(county_climpres, aes(x=slope, y=dem12to16))+
+  geom_hline(yintercept=0)+
+  geom_point(alpha = 0.30)+
+  geom_smooth(method = "lm",color="black",se=FALSE)+
+  scale_y_continuous(labels=scales::percent)+theme_pubclean(base_size = 8)+
+  labs(title="2016 county-level Dem vote share, minus 2012",
+       color="partisan swing category")+
+  ylab("percent swing, 2016 minus 2012")+
+  xlab(x_lab_diff)
+p_diff1a<-ggplot(county_climpres, aes(x=slope, y=dem12to16,color=wincategory2016))+
+  geom_hline(yintercept=0)+
+  geom_point(alpha = 0.30)+
+  geom_smooth(method = "lm",se=FALSE)+
+  scale_y_continuous(labels=scales::percent)+theme_pubclean(base_size = 8)+
+  labs(title="2016 county-level Dem vote share, minus 2012 [decomposed by partisan swing category]",
+       color="partisan swing category")+
+  ylab("percent swing, 2016 minus 2012")+
+  xlab(x_lab_diff)
+
+p_diff2<-ggplot(county_climpres, aes(x=slope, y=dem08to12))+
+  geom_hline(yintercept=0)+
+  geom_point(alpha = 0.50)+
+  geom_smooth(method = "lm",se=FALSE,color="black")+
+  scale_y_continuous(labels=scales::percent)+theme_pubclean(base_size = 8)+
+  labs(title="2012 county-level Dem vote share, minus 2008",
+       color="partisan swing cateogry")+
+  ylab("percent swing, 2012 minus 2008")+
+  xlab(x_lab_diff)
+p_diff2a<-ggplot(county_climpres, aes(x=slope, y=dem08to12,color=wincategory2012))+
+  geom_hline(yintercept=0)+
+  geom_point(alpha = 0.50)+
+  geom_smooth(method = "lm",se=FALSE)+
+  scale_y_continuous(labels=scales::percent)+theme_pubclean(base_size = 8)+
+  labs(title="2012 county-level Dem vote share, minus 2008 [decomposed by partisan swing category]",
+       color="partisan swing category")+
+  ylab("percent swing, 2012 minus 2008")+
+  xlab(x_lab_diff)
+
+p_diff3<-ggplot(county_climpres, aes(x=slope, y=dem04to08))+
+  geom_hline(yintercept=0)+
+  geom_point(alpha = 0.50)+
+  geom_smooth(method = "lm", color="black", se=FALSE)+
+  scale_y_continuous(labels=scales::percent)+theme_pubclean(base_size = 8)+
+  labs(title="2008 county-level Dem vote share, minus 2004")+
+  ylab("percent swing, 2008 minus 2004")+
+  xlab(x_lab_diff)
+p_diff3a<-ggplot(county_climpres, aes(x=slope, y=dem04to08, color=wincategory2008))+
+  geom_hline(yintercept=0)+
+  geom_point(alpha = 0.50)+
+  geom_smooth(method = "lm", se=FALSE)+
+  scale_y_continuous(labels=scales::percent)+theme_pubclean(base_size = 8)+
+  labs(title="2008 county-level Dem vote share, minus 2004 [decomposed by partisan swing category]",
+       color="partisan swing category")+
+  ylab("percent swing, 2008 minus 2004")+
+  xlab(x_lab_diff)
+
+p_diff4<-ggplot(county_climpres, aes(x=slope, y=dem00to04))+
+  geom_hline(yintercept=0)+
+  geom_point(alpha = 0.50)+
+  geom_smooth(method = "lm", color="black", se=FALSE)+
+  scale_y_continuous(labels=scales::percent)+theme_pubclean(base_size = 8)+
+  labs(title="2004 county-level Dem vote share, minus 2000")+
+  ylab("percent swing, 2004 minus 2000")+
+  xlab(x_lab_diff)
+p_diff4a<-ggplot(county_climpres, aes(x=slope, y=dem00to04, color=wincategory2004))+
+  geom_hline(yintercept=0)+
+  geom_point(alpha = 0.50)+
+  geom_smooth(method = "lm", se=FALSE)+
+  scale_y_continuous(labels=scales::percent)+theme_pubclean(base_size = 8)+
+  labs(title="2004 county-level Dem vote share, minus 2000 [decomposed by partisan swing category]",
+       color="partisan swing category")+
+  ylab("percent swing, 2004 minus 2000")+
+  xlab(x_lab_diff)
+
+grid.arrange(p_diff1,p_diff1a)
+grid.arrange(p_diff2,p_diff2a)
+grid.arrange(p_diff3,p_diff3a)
+grid.arrange(p_diff4,p_diff4a)
+
+```
+
+Above, I plot partisan swing between a series of different results-year-dyads: 2000 to 2004, 2000 to 2012, 2000 to 2016, 2004 to 2008, 2004 to 2012, 2008 to 2012, 2008 to 2016, and 2012 to 2016. I both aggregate and disaggregate the partisan swings by whether they were Democratic or Republican holds (wins in both years), and Democratic or Republican flips (loss in first year, win in second year). Aggregated partisan swings are in black, and disaggregated partisan swings are colored. I plot linear models for both aggregated and disaggregated partisan swings as well. The disaggregated plots are to determine whether the aggregate trend is present in these different groups: if Democratic holds always vote Democratic they are not subject to relationship between warming and Democratic vote share; similarly, if Republican holds always vote Republican, then they too are not subject to the hypothesized relationship either. Indeed, all groups seem to exhibit the same general relationship between warming and Democratic vote share. For example, the plot of 2008 county-level Dem vote share, minus 2004, shows that Republican holds exhibited the strongest relationship between warming and partisan swing, meaning that staunch Republican counties (2004 win and 2008 win), though some are arguably 'frontline' counties in regards to the rates of warming they are experiencing, are holding firm to their support for anti-climate action Republicans. By contrast, Democratic holds and Democratic flips showed barely any relationship between the rates of warming in their county and Democratic vote share at the county level, indicating either noise or bias in the data or, possibly, the lack of any relationship between the two variables, rate of warming and support for Democrats.
+
+# Models: Presidential Results & Partisan Swing against Rate of Warming
+
+```{r model relationships, warning=FALSE,message=FALSE,include=TRUE,eval=TRUE,error=FALSE,echo=FALSE, results='asis'}
+
+lm1 <- lm(data = county_climpres, dem2016~slope)
+predict2016 <- lm1$coefficients[2]
+predict2016_uppercf <- predict2016+1.96*0.337
+predict2016_lowercf <- predict2016-1.96*0.337
+df2016 <- data.frame(rec = 13,label = "2016",coef = predict2016,upper_ci = predict2016_uppercf,lower_ci = predict2016_lowercf)
+
+lm1_2 <- lm(data = county_climpres, dem12to16~slope)
+predict12to16 <- lm1_2$coefficients[2]
+predict12to16_uppercf <- predict12to16+1.96*0.110
+predict12to16_lowercf <- predict12to16-1.96*0.110
+df12to16 <- data.frame(rec = 1,label = "12-16",coef = predict12to16,upper_ci = predict12to16_uppercf,lower_ci = predict12to16_lowercf)
+
+lm2 <- lm(data = county_climpres, dem2012~slope)
+predict2012 <- lm2$coefficients[2]
+predict2012_uppercf <- predict2012+1.96*0.324
+predict2012_lowercf <- predict2012-1.96*0.324
+df2012 <- data.frame(rec = 12,label = "2012",coef = predict2012,upper_ci = predict2012_uppercf,lower_ci = predict2012_lowercf)
+
+lm2_3 <- lm(data = county_climpres, dem08to12~slope)
+predict08to12 <- lm2_3$coefficients[2]
+predict08to12_uppercf <- predict08to12+1.96*0.068
+predict08to12_lowercf <- predict08to12-1.96*0.068
+df08to12 <- data.frame(rec =2,label = "08-12",coef = predict08to12,upper_ci = predict08to12_uppercf,lower_ci = predict08to12_lowercf)
+
+lm3 <- lm(data = county_climpres, dem2008~slope)
+predict2008 <- lm3$coefficients[2]
+predict2008_uppercf <- predict2008+1.96*0.302
+predict2008_lowercf <- predict2008-1.96*0.302
+df2008 <- data.frame(rec = 11,label = "2008",coef = predict2008,upper_ci = predict2008_uppercf,lower_ci = predict2008_lowercf)
+
+lm3_4 <- lm(data = county_climpres, dem04to08~slope)
+predict04to08<- lm3_4$coefficients[2]
+predict04to08_uppercf <- predict04to08+1.96*0.103
+predict04to08_lowercf <- predict04to08-1.96*0.103
+df04to08 <- data.frame(rec = 3,label = "04-08",coef = predict04to08,upper_ci = predict04to08_uppercf,lower_ci = predict04to08_lowercf)
+
+lm4 <- lm(data = county_climpres, dem2004~slope)
+predict2004 <-lm4$coefficients[2]
+predict2004_uppercf <- predict2004+1.96*0.280
+predict2004_lowercf <- predict2004-1.96*0.280
+df2004 <- data.frame(rec = 10,label = "2004",coef = predict2004,upper_ci = predict2004_uppercf,lower_ci = predict2004_lowercf)
+
+lm4_5 <- lm(data = county_climpres, dem00to04~slope)
+predict00to04 <- lm4_5$coefficients[2]
+predict00to04_uppercf <- predict00to04+1.96*0.086
+predict00to04_lowercf <- predict00to04-1.96*0.086
+df00to04 <- data.frame(rec = 4,label = "00-04",coef = predict00to04,upper_ci = predict00to04_uppercf,lower_ci = predict00to04_lowercf)
+
+lm5 <- lm(data = county_climpres, dem2000~slope)
+predict2000 <-lm5$coefficients[2]
+predict2000_uppercf <- predict2000+1.96*0.266
+predict2000_lowercf <- predict2000-1.96*0.266
+df2000 <- data.frame(rec = 9,label = "2000",coef = predict2000,upper_ci = predict2000_uppercf,lower_ci = predict2000_lowercf)
+
+lm1_5 <- lm(data = county_climpres, dem00to16~slope)
+predict00to16 <- lm1_5$coefficients[2]
+predict00to16_uppercf <- predict00to16+1.96*0.209
+predict00to16_lowercf <- predict00to16-1.96*0.209
+df00to16 <- data.frame(rec = 5,label = "00-16",coef = predict00to16,upper_ci = predict00to16_uppercf,lower_ci = predict00to16_lowercf)
+
+lm3_5 <- lm(data = county_climpres, dem08to16~slope)
+predict08to16<- lm3_5$coefficients[2]
+predict08to16_uppercf <- predict08to16+1.96*0.141
+predict08to16_lowercf <- predict08to16-1.96*0.141
+df08to16<- data.frame(rec = 6,label = "08-16",coef = predict08to16,upper_ci = predict08to16_uppercf,lower_ci = predict08to16_lowercf)
+
+lm2_4 <- lm(data = county_climpres, dem04to12~slope)
+predict04to12 <- lm2_4$coefficients[2]
+predict04to12_uppercf <- predict04to12+1.96*0.123
+predict04to12_lowercf <- predict04to12-1.96*0.123
+df04to12 <- data.frame(rec = 7,label = "04-12",coef = predict04to12,upper_ci = predict04to12_uppercf,lower_ci = predict04to12_lowercf)
+
+lm1_4 <- lm(data = county_climpres, dem00to12~slope)
+predict00to12 <- lm1_4$coefficients[2]
+predict00to12_uppercf <- predict00to12+1.96*0.163
+predict00to12_lowercf <- predict00to12-1.96*0.163
+df00to12 <- data.frame(rec = 8,label = "00-12",coef = predict00to12,upper_ci = predict00to12_uppercf,lower_ci = predict00to12_lowercf)
+
+modelcalls<-rbind(lm1$call,lm1_2$call,lm2$call,lm2_3$call,lm3$call,lm3_4$call,lm4$call,lm4_5$call,lm5$call,lm1_5$call,lm3_5$call,lm2_4$call,lm1_4$call)
+
+modelcalls %>% knitr::kable(format="html",digits=2,caption = "model calls")%>%
+  kable_styling(full_width = T,
+                font_size = 10)
+
+```
+
+The table above reports the model specifications for each model. The tables below report the results of these 13 different models. The first five models report the relationship between Democratic vote share on the county-level for the previous 5 elections, 2000, 2004, 2008, 2012, and 2016. The latter 8 models report the relationship between partisan swing in Democratic vote share by subtracting earlier results from later results for 8 different results-year-dyads: 2000 to 2004, 2000 to 2012, 2000 to 2016, 2004 to 2008, 2004 to 2012, 2008 to 2012, 2008 to 2016, and 2012 to 2016. Generally, the coefficients on the election results model are statistically significant, which means that we can reject the null hypothesis in all cases (no relationship between rate of warming and Democratic vote share). However, there is no possible way to generate a causal conclusion from these models; the treatment (rate of warming) is not randomly assigned (as the map at the beginning of this post indicates), with high rates of warming concentrated in the west and north/northeast, and lower rates of warming concentrated in the south of the country. What we can say, however, is that generally speaking, the models predict that frontline counties (higher rates of warming) are associated with a couple percentage points higher Democratic vote share than counties on the back-end of warming (lower rates of warming).
+
+```{r stargazer model tables, warning=FALSE,message=FALSE,include=TRUE,eval=TRUE,error=FALSE,echo=FALSE, results='asis'}
+
+
+stargazer(lm1,lm2,lm3,lm4,lm5,
+          type='html',
+          keep.stat=c("n","rsq"),
+          covariate.labels = c('rate of change [celsius]','intercept'),
+          model.numbers = TRUE,
+          column.sep.width = "10pt",
+          colnames= FALSE,
+          style='qje',
+          title = 'linear models: political results against rate of change in mean annual temperature')
+
+stargazer(lm1_2,lm2_3,lm3_4,lm4_5,lm1_5,lm3_5,lm2_4,lm1_4,
+          type='html',
+          keep.stat=c("n","rsq"),
+          covariate.labels = c('rate of change [celsius]','intercept'),
+          model.numbers = TRUE,
+          column.sep.width = "5pt",
+          colnames= FALSE,
+          style='qje',
+          title = 'linear models: partisan swing against rate of change in mean annual temperature')
+
+
+```
+
+# Model Results: Presidential Results & Partisan Swing against Rate of Warming
+
+Finally, I collect the results of each model -- the coefficient and upper and lower confidence intervals -- and plot them below to depict the range of possible means with which our population data is consistent. By and large, increase in the rate of warming is associated in the latter four elections (2004, 2008, 2012, and 2016) with increases in Democratic vote share, and the null hypothesis (no relationship) is effectively ruled out by the fact the confidence intervals on these coefficients does not include zero. For partisan swing, the results are more difficult to interpret. In essence, there is a non-zero relationship (null hypothesis ruled out) between rates of warming and partisan swing. Interestingly, the largest time interval for which we can calculate a partisan swing, from 2000 to 2016, reports the second highest coefficient on the relationship between warming and Democratic vote share. This model predicts about 4.32 more percentage points of Democratic vote share at the county level for each .01 degree Celsius increase in the rate of warming, which is fairly significant. 
+
+```{r collect sample means and confints, warning=FALSE,message=FALSE,include=TRUE,eval=TRUE,error=FALSE,echo=FALSE, results='asis'}
+
+# construct a partisan swing & results model data frame
+modelresults <- rbind(df00to12,
+                      df00to04,
+                      df00to16,
+                      df04to08,
+                      df04to12,
+                      df08to12,
+                      df08to16,
+                      df12to16,
+                      df2000,
+                      df2004,
+                      df2008,
+                      df2012,
+                      df2016)
+
+modelresults<-modelresults %>% arrange(rec)
+
+
+ggplot(modelresults,aes(x=label,y=coef))+
+  geom_point()+
+  geom_linerange(ymin=modelresults$lower_ci, ymax=modelresults$upper_ci)+
+  geom_text(label = round(modelresults$coef,2),nudge_x=-0.3,size=3)+
+  theme_pubclean(base_size=10)+
+  labs(title = "coefficients on modeled relationships",
+       subtitle = "partisan swing models (left), results models (right)",
+       caption = "see table below for data table; above, the graph plots the value of the coefficient on the relationship between the rate of change in mean annual temperature and the political outcome, both election results (left) or the partisan swing between those election results (right)")+
+  geom_hline(yintercept=0)+
+  geom_vline(xintercept=8.4, linetype=3)+
+  xlab("partisan swing differentials & dem percentage vote share results")+
+  ylab("coefficient on modeled relationship")
+
+modelresults %>% 
+  mutate(coef = round(coef,3),upper_ci = round(upper_ci,3),lower_ci = round(lower_ci,3)) %>% 
+  kable(caption = "reported coefficients on modeled relationships and upper and lower bounds of 95% confidence intervals",
+        row.names = FALSE, 
+        col.names = c("#","model","coefficient","upper 95% c.i.", "upper 95% c.i.")) %>%
+  kable_styling(full_width = T,
+                font_size = 10) %>%
+  column_spec(column=1,bold=TRUE) %>%
+  column_spec(column=4,italic=TRUE) %>% 
+  column_spec(column=5,italic=TRUE)
+
+model_state %>% 
+  mutate(State = state_name, `Rate of change` = slope) %>% 
+  dplyr::select(State,`Temperature change`,`Temperature change (Decade)`,`Rate of change`) %>% 
+  knitr::kable(format="html",digits=2)%>%
+  column_spec(column=2,bold=TRUE) %>%
+  column_spec(column=4,italic=TRUE) %>%
+  kable_styling(full_width = T,
+                font_size = 10)
+```
+
+Above, I also report the dataset used to run the models, which I generated based on the Washington Post's analysis. Rate of change is the key independent variable of interest in the proceeding analysis, and it is reported on the right, rounded to 2 decimal places.
+
+# Concluding thoughts
+
+There is some suggestive and some more ambiguous evidence here of the presence of a relationship at the county level between partisan selection during elections and the rate of warming experienced, but we cannot conclude anything regarding causality. Further research should examine, separately and in conjunction with rates of warming, rates of change in precipitation, and whether there is any singular and/or joint variation (with warming rates) with presidential results and partisan swing.
